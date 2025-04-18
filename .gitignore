@@ -1,0 +1,33 @@
+# Ignorar node_modules en CUALQUIER subdirectorio
+node_modules/
+*/node_modules/
+
+# Archivos de entorno (MUY IMPORTANTE)
+.env
+.env.*
+!.env.example
+frontend/.env*
+backend/.env*
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Archivos de Build / Distribución (Ajusta según tus proyectos)
+dist/
+*/dist/
+dist-ssr/
+build/
+*/build/
+
+# Otros comunes
+.idea/
+.vscode/
+*.local
+.DS_Store
+Thumbs.db
