@@ -1,145 +1,258 @@
 // src/servicios/specimenService.js
-
-const specimenRepository = require('../repositorios/specimenRepository'); // Verifica que la ruta sea correcta
-
-// Log para verificar la carga inicial del repositorio
-console.log('[SpecimenService] Contenido de specimenRepository al cargar:', typeof specimenRepository, specimenRepository ? Object.keys(specimenRepository) : 'No cargado');
-if (typeof specimenRepository?.getAllSpecimens !== 'function') {
-     console.error('[SpecimenService] ¡ALERTA! La función getAllSpecimens NO está disponible en specimenRepository al cargar.');
-}
+const { Op } = require('sequelize');
+// Asegúrate de que la ruta a associations sea correcta
+const { Specimen, Sede, SpecimenCategory, Client, Contract } = require('../modelos/associations');
 
 /**
- * Llama al repositorio para crear un ejemplar.
- * @param {object} specimenData - Datos del nuevo ejemplar.
- * @returns {Promise<Model>} La instancia del ejemplar creado.
+ * Crea un nuevo ejemplar.
+ * @param {object} specimenData - Datos del ejemplar (incluyendo name, specimenCategoryId, sedeId, etc.).
+ * @returns {Promise<Specimen>} El ejemplar creado.
+ * @throws {Error} Si la sede no existe o si hay un error de base de datos.
  */
 const createSpecimen = async (specimenData) => {
-    console.log('[SpecimenService] Llamando a specimenRepository.createSpecimen...');
+    const { sedeId, specimenCategoryId, clientId, contractId, ...restData } = specimenData;
+
+    // --- Validación de Existencia de Claves Foráneas ---
+    // Aunque el middleware ya valida, una verificación extra aquí es buena práctica.
+    if (!sedeId) {
+        throw new Error('El ID de la sede es obligatorio para crear un ejemplar.');
+    }
+    const sedeExists = await Sede.findByPk(sedeId);
+    if (!sedeExists) {
+        throw new Error(`La sede con ID ${sedeId} no existe.`);
+    }
+
+    if (!specimenCategoryId) {
+        throw new Error('El ID de la categoría es obligatorio.');
+    }
+    const categoryExists = await SpecimenCategory.findByPk(specimenCategoryId);
+    if (!categoryExists) {
+        throw new Error(`La categoría con ID ${specimenCategoryId} no existe.`);
+    }
+
+    if (clientId) {
+        const clientExists = await Client.findByPk(clientId);
+        if (!clientExists) {
+            throw new Error(`El cliente con ID ${clientId} no existe.`);
+        }
+    }
+     if (contractId) {
+        const contractExists = await Contract.findByPk(contractId);
+        if (!contractExists) {
+            throw new Error(`El contrato con ID ${contractId} no existe.`);
+        }
+    }
+    // -----------------------------------------------------
+
     try {
-        // Aquí podrías añadir lógica de negocio antes de crear, si fuera necesario
-        const newSpecimen = await specimenRepository.createSpecimen(specimenData);
-        return newSpecimen;
+        // Crear el ejemplar con todos los datos validados
+        const newSpecimen = await Specimen.create({
+            sedeId,
+            specimenCategoryId,
+            clientId: clientId || null, // Asegura null si no se proporciona
+            contractId: contractId || null, // Asegura null si no se proporciona
+            ...restData
+        });
+        // Opcional: Recargar el ejemplar creado con sus relaciones para devolverlo completo
+        return getSpecimenById(newSpecimen.id);
     } catch (error) {
-        console.error("[SpecimenService] Error al crear ejemplar:", error);
-        // Podrías personalizar el mensaje de error aquí
-        throw new Error(`Error en el servicio al crear ejemplar: ${error.message}`);
+        // Capturar errores de validación de Sequelize u otros errores de DB
+        if (error.name === 'SequelizeValidationError') {
+            const messages = error.errors.map(e => e.message).join(', ');
+            throw new Error(`Error de validación: ${messages}`);
+        }
+        // Capturar error de identificador único si la DB lo detecta (aunque ya validamos)
+        if (error.name === 'SequelizeUniqueConstraintError') {
+             throw new Error('Error: El identificador único (UUID) ya está en uso.');
+        }
+        console.error("Error en specimenService.createSpecimen:", error);
+        throw new Error('Error interno al crear el ejemplar.'); // Error genérico
     }
 };
 
 /**
- * Llama al repositorio para obtener todos los ejemplares.
- * @returns {Promise<Array<Model>>} Un array con todos los ejemplares.
+ * Obtiene todos los ejemplares, incluyendo información básica de su sede y categoría.
+ * @returns {Promise<Array<Specimen>>} Lista de ejemplares.
  */
 const getAllSpecimens = async () => {
-    console.log('[SpecimenService] Llamando a specimenRepository.getAllSpecimens...');
     try {
-        // Llama directamente a la función del repositorio
-        const specimens = await specimenRepository.getAllSpecimens();
-        console.log(`[SpecimenService] Recibidos ${specimens?.length ?? 0} ejemplares del repositorio.`);
+        const specimens = await Specimen.findAll({
+            include: [
+                {
+                    model: Sede,
+                    as: 'sede', // Alias de la asociación Specimen.belongsTo(Sede)
+                    attributes: ['id', 'NombreSede'] // Solo traer campos necesarios
+                },
+                {
+                    model: SpecimenCategory,
+                    as: 'category', // Alias de Specimen.belongsTo(SpecimenCategory)
+                    attributes: ['id', 'name'] // Asumiendo que la categoría tiene 'name'
+                },
+{
+    model: Client,
+    as: 'propietario', // Alias de Specimen.belongsTo(Client)
+    attributes: ['id', 'nombre'] // Cambiado 'name' a 'nombre' para coincidir con el modelo Client
+},
+                 {
+                    model: Contract,
+                    as: 'contract', // Alias de Specimen.belongsTo(Contract)
+                    attributes: ['id', 'contractNumber'] // Asumiendo que el contrato tiene 'contractNumber'
+                }
+            ],
+            order: [
+                ['name', 'ASC'] // Ordenar alfabéticamente por nombre, por ejemplo
+            ]
+        });
         return specimens;
     } catch (error) {
-        console.error("[SpecimenService] Error al obtener todos los ejemplares:", error);
-        throw new Error(`Error en el servicio al obtener ejemplares: ${error.message}`);
+        console.error("Error en specimenService.getAllSpecimens:", error);
+        throw new Error('Error al obtener la lista de ejemplares.');
     }
 };
 
 /**
- * Llama al repositorio para obtener un ejemplar por ID.
- * @param {number|string} id - El ID del ejemplar.
- * @returns {Promise<Model|null>} La instancia del ejemplar o null.
+ * Obtiene un ejemplar por su ID, incluyendo detalles de sede, categoría, cliente y contrato.
+ * @param {number} id - ID del ejemplar.
+ * @returns {Promise<Specimen>} El ejemplar encontrado.
+ * @throws {Error} Si el ejemplar no se encuentra.
  */
 const getSpecimenById = async (id) => {
-    console.log(`[SpecimenService] Llamando a specimenRepository.getSpecimenById para ID: ${id}`);
     try {
-        const specimen = await specimenRepository.getSpecimenById(id);
+        const specimen = await Specimen.findByPk(id, {
+            include: [
+                { model: Sede, as: 'sede' },
+                { model: SpecimenCategory, as: 'category' },
+                { model: Client, as: 'propietario' },
+                { model: Contract, as: 'contract' }
+            ]
+        });
+
         if (!specimen) {
-            // Podrías manejar el "no encontrado" aquí o dejar que el controlador lo haga
-             console.log(`[SpecimenService] Ejemplar con ID ${id} no encontrado por el repositorio.`);
-             // throw new Error('Ejemplar no encontrado'); // O lanzar error
+            // Lanzar un error específico para que el controlador devuelva 404
+            const error = new Error('Ejemplar no encontrado');
+            error.status = 404;
+            throw error;
         }
         return specimen;
     } catch (error) {
-        console.error(`[SpecimenService] Error al obtener ejemplar por ID ${id}:`, error);
-        throw new Error(`Error en el servicio al obtener ejemplar por ID: ${error.message}`);
+         // Si ya tiene status (como el 404), relanzarlo
+        if (error.status) throw error;
+        // Si no, loguear y lanzar error genérico
+        console.error(`Error en specimenService.getSpecimenById (ID: ${id}):`, error);
+        throw new Error('Error al obtener el ejemplar.');
     }
 };
 
 /**
- * Llama al repositorio para actualizar un ejemplar.
- * @param {number|string} id - El ID del ejemplar.
- * @param {object} specimenData - Los datos a actualizar.
- * @returns {Promise<Array<number>>} Array con el número de filas afectadas.
+ * Actualiza un ejemplar existente.
+ * @param {number} id - ID del ejemplar a actualizar.
+ * @param {object} updateData - Datos a actualizar.
+ * @returns {Promise<Specimen>} El ejemplar actualizado.
+ * @throws {Error} Si el ejemplar no se encuentra o hay un error de validación/DB.
  */
-const updateSpecimen = async (id, specimenData) => {
-    console.log(`[SpecimenService] Llamando a specimenRepository.updateSpecimen para ID: ${id}`);
+const updateSpecimen = async (id, updateData) => {
+    // Buscar primero para asegurar que existe (aunque el middleware ya valida)
+    const specimen = await getSpecimenById(id); // Reutiliza la función getById
+
+    // Validar existencia de claves foráneas si se están actualizando
+    if (updateData.sedeId) {
+         const sedeExists = await Sede.findByPk(updateData.sedeId);
+         if (!sedeExists) throw new Error(`La sede con ID ${updateData.sedeId} no existe.`);
+    }
+     if (updateData.specimenCategoryId) {
+         const categoryExists = await SpecimenCategory.findByPk(updateData.specimenCategoryId);
+         if (!categoryExists) throw new Error(`La categoría con ID ${updateData.specimenCategoryId} no existe.`);
+     }
+    if (updateData.clientId) {
+         const clientExists = await Client.findByPk(updateData.clientId);
+         if (!clientExists) throw new Error(`El cliente con ID ${updateData.clientId} no existe.`);
+     }
+      if (updateData.contractId) {
+         const contractExists = await Contract.findByPk(updateData.contractId);
+         if (!contractExists) throw new Error(`El contrato con ID ${updateData.contractId} no existe.`);
+     }
+
     try {
-        // Podrías añadir validaciones de datos aquí
-        const result = await specimenRepository.updateSpecimen(id, specimenData);
-        if (result[0] === 0) {
-             console.warn(`[SpecimenService] updateSpecimen ID ${id}: Ninguna fila afectada (¿no encontrado o sin cambios?).`);
-             // Podrías lanzar un error si se espera que siempre se actualice algo
-             // throw new Error('Ejemplar no encontrado para actualizar o datos sin cambios.');
-        }
-        return result; // Devuelve [affectedRows]
+        // Actualizar el ejemplar encontrado
+        await specimen.update(updateData);
+        // Recargar con las asociaciones actualizadas
+        return getSpecimenById(id);
     } catch (error) {
-        console.error(`[SpecimenService] Error al actualizar ejemplar ID ${id}:`, error);
-        throw new Error(`Error en el servicio al actualizar ejemplar: ${error.message}`);
+        if (error.name === 'SequelizeValidationError') {
+            const messages = error.errors.map(e => e.message).join(', ');
+            throw new Error(`Error de validación: ${messages}`);
+        }
+         if (error.name === 'SequelizeUniqueConstraintError') {
+             throw new Error('Error: El identificador único (UUID) ya está en uso por otro ejemplar.');
+        }
+        console.error(`Error en specimenService.updateSpecimen (ID: ${id}):`, error);
+        throw new Error('Error interno al actualizar el ejemplar.');
     }
 };
 
 /**
- * Llama al repositorio para eliminar un ejemplar.
- * @param {number|string} id - El ID del ejemplar.
- * @returns {Promise<number>} El número de filas eliminadas.
+ * Elimina un ejemplar por su ID.
+ * @param {number} id - ID del ejemplar a eliminar.
+ * @returns {Promise<number>} El número de filas eliminadas (debería ser 1).
+ * @throws {Error} Si el ejemplar no se encuentra.
  */
 const deleteSpecimen = async (id) => {
-    console.log(`[SpecimenService] Llamando a specimenRepository.deleteSpecimen para ID: ${id}`);
+    // Verificar existencia primero (middleware ya lo hace, pero es seguro aquí también)
+    await getSpecimenById(id);
+
     try {
-        const deletedRows = await specimenRepository.deleteSpecimen(id);
-        if (deletedRows === 0) {
-             console.warn(`[SpecimenService] deleteSpecimen ID ${id}: Ninguna fila eliminada (¿no encontrado?).`);
-             // throw new Error('Ejemplar no encontrado para eliminar.');
-        }
-        return deletedRows; // Devuelve 0 o 1
+        const deletedRows = await Specimen.destroy({
+            where: { id: id }
+        });
+        // deletedRows será 1 si se eliminó correctamente
+        return deletedRows;
     } catch (error) {
-        console.error(`[SpecimenService] Error al eliminar ejemplar ID ${id}:`, error);
-        throw new Error(`Error en el servicio al eliminar ejemplar: ${error.message}`);
+        console.error(`Error en specimenService.deleteSpecimen (ID: ${id}):`, error);
+        // Podría haber errores si hay restricciones de clave foránea que impiden borrar
+        if (error.name === 'SequelizeForeignKeyConstraintError') {
+             throw new Error('No se puede eliminar el ejemplar porque tiene registros asociados (medicinas, vacunaciones, etc.).');
+        }
+        throw new Error('Error interno al eliminar el ejemplar.');
     }
 };
 
 /**
- * Llama al repositorio para mover un ejemplar (actualizar FKs).
- * @param {number|string} id - El ID del ejemplar.
- * @param {number|null} sedeId - El nuevo ID de la sede.
- * @param {number|null} specimenCategoryId - El nuevo ID de la categoría.
- * @returns {Promise<Array<number>>} Array con el número de filas afectadas.
+ * Mueve un ejemplar a una nueva sede y/o categoría.
+ * @param {number} id - ID del ejemplar a mover.
+ * @param {number} [newSedeId] - Nuevo ID de sede (opcional).
+ * @param {number} [newCategoryId] - Nuevo ID de categoría (opcional).
+ * @returns {Promise<Specimen>} El ejemplar actualizado.
+ * @throws {Error} Si el ejemplar, la nueva sede o la nueva categoría no existen, o si ya está en la ubicación de destino.
  */
-const moveSpecimen = async (id, sedeId, specimenCategoryId) => {
-     // El repositorio specimenRepository ya parsea y prepara los datos en 'moveData'
-     // por lo que podemos pasar los argumentos directamente.
-     // Sin embargo, la firma de la función en el servicio era diferente. La ajustamos:
-     console.log(`[SpecimenService] Llamando a specimenRepository.moveSpecimen para ID: ${id}`);
-     const moveData = {};
-     if (sedeId !== undefined) moveData.sedeId = sedeId;
-     if (specimenCategoryId !== undefined) moveData.specimenCategoryId = specimenCategoryId;
+const moveSpecimen = async (id, newSedeId, newCategoryId) => {
+    // Middleware ya valida existencia y que no sea el mismo destino
+    const specimen = await getSpecimenById(id); // Obtener el ejemplar
 
-     try {
-         // Nota: La función moveSpecimen en el repositorio espera un objeto 'moveData'
-         // A diferencia de la firma original de esta función de servicio.
-         // Ahora llamamos a la función del repositorio que espera un objeto.
-         // Asegúrate que tu specimenRepository.moveSpecimen maneje este objeto { sedeId, specimenCategoryId }
-         // (La última versión que te di sí lo hace)
-        const result = await specimenRepository.moveSpecimen(id, moveData);
-         if (result[0] === 0) {
-             console.warn(`[SpecimenService] moveSpecimen ID ${id}: Ninguna fila afectada.`);
-             // throw new Error('Ejemplar no encontrado para mover o sin cambios en IDs.');
-         }
-         return result;
-     } catch (error) {
-         console.error(`[SpecimenService] Error al mover ejemplar ID ${id}:`, error);
-         throw new Error(`Error en el servicio al mover ejemplar: ${error.message}`);
-     }
+    const updatePayload = {};
+    if (newSedeId !== undefined && newSedeId !== null) {
+        updatePayload.sedeId = newSedeId;
+    }
+    if (newCategoryId !== undefined && newCategoryId !== null) {
+        updatePayload.specimenCategoryId = newCategoryId;
+    }
+
+    if (Object.keys(updatePayload).length === 0) {
+        throw new Error('No se especificó una nueva sede o categoría para mover.');
+    }
+
+    try {
+        await specimen.update(updatePayload);
+        return getSpecimenById(id); // Devolver el ejemplar actualizado
+    } catch (error) {
+        if (error.name === 'SequelizeValidationError') {
+            const messages = error.errors.map(e => e.message).join(', ');
+            throw new Error(`Error de validación al mover: ${messages}`);
+        }
+        console.error(`Error en specimenService.moveSpecimen (ID: ${id}):`, error);
+        throw new Error('Error interno al mover el ejemplar.');
+    }
 };
+
 
 module.exports = {
     createSpecimen,

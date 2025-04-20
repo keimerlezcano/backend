@@ -1,150 +1,205 @@
 // src/servicios/sedeService.js
-
-const Sede = require('../modelos/sede'); // Importa modelo por si se necesita
-const sedeRepository = require('../repositorios/sedeRepository.js'); // Asegúrate que la RUTA es correcta
-
-// Log para verificar la carga inicial del repositorio
-console.log('[SedeService] Contenido de sedeRepository al cargar:', typeof sedeRepository, sedeRepository ? Object.keys(sedeRepository) : 'No cargado');
-if (typeof sedeRepository?.getAllSedes !== 'function') {
-     // Si esto aparece, hay un problema serio de carga (posible dependencia circular)
-     console.error('[SedeService] ¡ALERTA CRÍTICA! La función getAllSedes NO está disponible en sedeRepository en el momento de la carga inicial del módulo.');
-}
+// Asegúrate de que la ruta a associations sea correcta
+const { Sede, Specimen } = require('../modelos/associations');
+const { sedeExists, sedeExistsById } = require('../repositorios/sedeRepository'); // Usar repositorio para chequeos de existencia
 
 /**
- * Obtiene una lista de todas las Sedes.
- * @returns {Promise<Array<Model>>} Un array con todas las instancias de Sede.
- * @throws {Error} Si ocurre un error al interactuar con el repositorio.
+ * Obtiene todas las sedes.
+ * @returns {Promise<Array<Sede>>} Lista de sedes.
  */
 const listSedes = async () => {
     console.log('[SedeService] Iniciando listSedes...');
     try {
-        // El nombre de la función en el repositorio ES 'getAllSedes'
-        const functionNameToCall = 'getAllSedes';
-
-        // Doble verificación justo antes de llamar (por si acaso)
-        if (typeof sedeRepository?.[functionNameToCall] !== 'function') {
-            console.error(`[SedeService] Error en tiempo de ejecución: sedeRepository.${functionNameToCall} NO es una función.`);
-            throw new Error(`Función interna '${functionNameToCall}' no disponible para obtener sedes.`);
-        }
-
-        console.log(`[SedeService] Llamando a sedeRepository.${functionNameToCall}()...`);
-        const sedes = await sedeRepository[functionNameToCall](); // Llama a la función usando el nombre correcto
-        console.log(`[SedeService] Sedes obtenidas del repositorio (${sedes?.length || 0} encontradas).`);
+        const sedes = await Sede.findAll({
+            order: [['NombreSede', 'ASC']] // Ordenar por nombre
+        });
+        console.log('[SedeService] Sedes encontradas:', sedes.length);
         return sedes;
-
     } catch (error) {
-        console.error("[SedeService] Error en listSedes al llamar al repositorio:", error);
-        // Si el error viene del repo, incluir su mensaje puede ser útil
-        throw new Error(`Error al obtener las sedes desde el repositorio: ${error.message || error}`);
+        console.error('[SedeService] Error en listSedes:', error);
+        throw new Error('Error al obtener la lista de sedes desde el servicio.');
     }
 };
 
 /**
- * Busca una Sede específica por su ID.
- * @param {number|string} id - El ID de la Sede a buscar.
- * @returns {Promise<Model>} La instancia de Sede encontrada.
- * @throws {Error} Si la Sede no se encuentra o si ocurre un error.
- */
-const findSede = async (id) => {
-    console.log(`[SedeService] Iniciando findSede para ID: ${id}`);
-    const functionName = 'getSedeById'; // Asumiendo este nombre del repo es correcto
-    try {
-        if (typeof sedeRepository?.[functionName] !== 'function') {
-             throw new Error(`Función interna '${functionName}' no disponible.`);
-        }
-        const sede = await sedeRepository[functionName](id);
-        if (!sede) {
-            console.log(`[SedeService] Sede con ID ${id} no encontrada.`);
-            throw new Error('Sede no encontrada');
-        }
-        console.log(`[SedeService] Sede encontrada para ID: ${id}`);
-        return sede;
-    } catch (error) {
-        console.error(`[SedeService] Error en findSede (ID: ${id}):`, error);
-        throw new Error(`Error al obtener la sede: ${error.message}`);
-    }
-};
-
-/**
- * Agrega una nueva Sede a la base de datos.
- * @param {object} sedeData - Los datos para la nueva Sede.
- * @returns {Promise<Model>} La instancia de la Sede creada.
- * @throws {Error} Si ocurre un error durante la creación.
+ * Añade una nueva sede.
+ * @param {object} sedeData - Datos de la sede (ej: { NombreSede: 'Sede Central' }).
+ * @returns {Promise<Sede>} La sede creada.
+ * @throws {Error} Si ya existe una sede con ese nombre o hay error de DB.
  */
 const addSede = async (sedeData) => {
     console.log('[SedeService] Iniciando addSede con datos:', sedeData);
-    const functionName = 'createSede'; // Asumiendo este nombre del repo es correcto
+    // Validación de nombre único ya la hace el middleware/modelo, pero podemos re-chequear
+    const exists = await sedeExists(sedeData.NombreSede);
+    if (exists) {
+        throw new Error(`Ya existe una sede con el nombre '${sedeData.NombreSede}'.`);
+    }
+
     try {
-         if (typeof sedeRepository?.[functionName] !== 'function') {
-             throw new Error(`Función interna '${functionName}' no disponible.`);
-        }
-        const nuevaSede = await sedeRepository[functionName](sedeData);
-        console.log(`[SedeService] Sede creada con ID: ${nuevaSede.id}`);
-        return nuevaSede;
+        const newSede = await Sede.create(sedeData);
+        console.log('[SedeService] Sede creada:', newSede);
+        return newSede;
     } catch (error) {
-        console.error("[SedeService] Error en addSede:", error);
-        throw new Error(`Error al agregar la sede: ${error.message}`);
+        console.error('[SedeService] Error en addSede:', error);
+         if (error.name === 'SequelizeValidationError') {
+            const messages = error.errors.map(e => e.message).join(', ');
+            throw new Error(`Error de validación: ${messages}`);
+        }
+        throw new Error('Error interno al añadir la sede.');
     }
 };
 
 /**
- * Modifica una Sede existente.
- * @param {number|string} id - El ID de la Sede a modificar.
- * @param {object} sedeData - Los nuevos datos para la Sede.
- * @returns {Promise<Array<number>>} Un array indicando el número de filas afectadas.
- * @throws {Error} Si la Sede no se encuentra o si ocurre un error.
+ * Encuentra una sede por su ID, incluyendo sus ejemplares asociados.
+ * @param {number} id - ID de la sede.
+ * @returns {Promise<Sede>} La sede encontrada con sus ejemplares.
+ * @throws {Error} Si la sede no se encuentra (con status 404).
+ */
+const findSede = async (id) => {
+    console.log(`[SedeService] Buscando sede por ID: ${id}`);
+    try {
+        const sede = await Sede.findByPk(id, {
+            include: [
+                {
+                    model: Specimen,
+                    as: 'ejemplaresEnSede', // Alias de la asociación Sede.hasMany(Specimen)
+                    attributes: ['id', 'name', 'identifier', 'breed', 'color'] // Seleccionar campos específicos de los ejemplares
+                    // Podrías añadir más includes aquí si quisieras detalles de la categoría del ejemplar, etc.
+                    // include: [{ model: SpecimenCategory, as: 'category', attributes: ['name']}]
+                }
+            ]
+        });
+
+        if (!sede) {
+            console.warn(`[SedeService] Sede con ID ${id} no encontrada.`);
+            // Lanzar un error específico que el controlador pueda identificar como 404
+            const error = new Error('Sede no encontrada');
+            error.status = 404; // Añadir status al error
+            throw error;
+        }
+
+        console.log(`[SedeService] Sede encontrada (ID: ${id}):`, sede.NombreSede, `con ${sede.ejemplaresEnSede?.length || 0} ejemplares.`);
+        return sede;
+    } catch (error) {
+        // Si ya tiene status (como el 404), relanzarlo
+        if (error.status) throw error;
+
+        // Si no, loguear y lanzar error genérico
+        console.error(`[SedeService] Error en findSede (ID: ${id}):`, error);
+        throw new Error('Error al buscar la sede.');
+    }
+};
+
+/**
+ * Modifica una sede existente.
+ * @param {number} id - ID de la sede a modificar.
+ * @param {object} sedeData - Nuevos datos para la sede.
+ * @returns {Promise<Array<number>>} Array con el número de filas afectadas (debería ser [1]).
+ * @throws {Error} Si la sede no se encuentra o si el nuevo nombre ya existe en otra sede.
  */
 const modifySede = async (id, sedeData) => {
-    console.log(`[SedeService] Iniciando modifySede para ID: ${id} con datos:`, sedeData);
-    const functionName = 'updateSede'; // Asumiendo este nombre del repo es correcto
+    console.log(`[SedeService] Modificando sede ID: ${id} con datos:`, sedeData);
+    // Verificar que la sede a modificar existe
+    const sedeExistsCheck = await sedeExistsById(id);
+    if (!sedeExistsCheck) {
+        throw new Error(`Sede con ID ${id} no encontrada para modificar.`);
+    }
+
+    // Verificar si el nuevo nombre ya está en uso por OTRA sede
+    if (sedeData.NombreSede) {
+        const existingSedeWithSameName = await Sede.findOne({
+            where: {
+                NombreSede: sedeData.NombreSede,
+                id: { [Op.ne]: id } // [Op.ne] = Not Equal (diferente de este ID)
+            }
+        });
+        if (existingSedeWithSameName) {
+            throw new Error(`Ya existe OTRA sede con el nombre '${sedeData.NombreSede}'.`);
+        }
+    }
+
     try {
-        if (typeof sedeRepository?.[functionName] !== 'function') {
-             throw new Error(`Función interna '${functionName}' no disponible.`);
+        const [affectedRows] = await Sede.update(sedeData, {
+            where: { id: id }
+        });
+
+        // affectedRows será 1 si se actualizó, 0 si no se encontró (aunque ya chequeamos) o los datos eran iguales
+        if (affectedRows === 0) {
+             // Podría pasar si los datos enviados son idénticos a los existentes
+             console.warn(`[SedeService] modifySede para ID ${id} no afectó filas (¿datos iguales o no encontrada?).`);
+             // Lanzar error si se esperaba un cambio efectivo
+             // throw new Error('No se pudo actualizar la sede o los datos eran idénticos.');
         }
-        const affectedRowsArray = await sedeRepository[functionName](id, sedeData);
-        if (!affectedRowsArray || affectedRowsArray[0] === 0) {
-            console.log(`[SedeService] modifySede: Sede con ID ${id} no encontrada o datos sin cambios.`);
-            throw new Error('Sede no encontrada para actualizar o los datos no cambiaron');
-        }
-        console.log(`[SedeService] Sede con ID ${id} actualizada. Filas afectadas: ${affectedRowsArray[0]}`);
-        return affectedRowsArray;
+
+        console.log(`[SedeService] Sede ID ${id} modificada, filas afectadas: ${affectedRows}`);
+        return [affectedRows]; // Sequelize devuelve un array con las filas afectadas
     } catch (error) {
         console.error(`[SedeService] Error en modifySede (ID: ${id}):`, error);
-        throw new Error(`Error al actualizar la sede: ${error.message}`);
+         if (error.name === 'SequelizeValidationError') {
+            const messages = error.errors.map(e => e.message).join(', ');
+            throw new Error(`Error de validación: ${messages}`);
+        }
+        throw new Error('Error interno al modificar la sede.');
     }
 };
 
 /**
- * Elimina una Sede de la base de datos.
- * @param {number|string} id - El ID de la Sede a eliminar.
- * @returns {Promise<object>} Un objeto indicando el éxito de la operación.
- * @throws {Error} Si la Sede no se encuentra o si ocurre un error.
+ * Elimina una sede por su ID.
+ * @param {number} id - ID de la sede a eliminar.
+ * @returns {Promise<number>} El número de filas eliminadas (debería ser 1).
+ * @throws {Error} Si la sede no se encuentra o si tiene ejemplares asociados (debido a la FK).
  */
 const removeSede = async (id) => {
-    console.log(`[SedeService] Iniciando removeSede para ID: ${id}`);
-    const functionName = 'deleteSede'; // Asumiendo este nombre del repo es correcto
+    console.log(`[SedeService] Intentando eliminar sede ID: ${id}`);
+    // Verificar existencia (middleware ya lo hace)
+    const sedeExistsCheck = await sedeExistsById(id);
+    if (!sedeExistsCheck) {
+        // Lanzar error 404
+        const error = new Error(`Sede con ID ${id} no encontrada para eliminar.`);
+        error.status = 404;
+        throw error;
+    }
+
+    // Opcional: Verificar si tiene ejemplares antes de intentar borrar
+    // const ejemplaresCount = await Specimen.count({ where: { sedeId: id } });
+    // if (ejemplaresCount > 0) {
+    //     throw new Error(`No se puede eliminar la sede ID ${id} porque tiene ${ejemplaresCount} ejemplares asociados.`);
+    // }
+
     try {
-        if (typeof sedeRepository?.[functionName] !== 'function') {
-             throw new Error(`Función interna '${functionName}' no disponible.`);
-        }
-        const deletedRows = await sedeRepository[functionName](id);
+        const deletedRows = await Sede.destroy({
+            where: { id: id }
+        });
+
+        // deletedRows será 1 si se eliminó, 0 si no se encontró (aunque ya chequeamos)
         if (deletedRows === 0) {
-             console.log(`[SedeService] removeSede: Sede con ID ${id} no encontrada para eliminar.`);
-            throw new Error('Sede no encontrada para eliminar');
+             console.warn(`[SedeService] removeSede para ID ${id} no eliminó filas (¿no encontrada?).`);
+             // Podríamos lanzar el 404 aquí también por si acaso
+             const error = new Error(`Sede con ID ${id} no encontrada para eliminar.`);
+             error.status = 404;
+             throw error;
         }
-        console.log(`[SedeService] Sede con ID ${id} eliminada.`);
-        return { message: 'Sede eliminada correctamente' };
+
+        console.log(`[SedeService] Sede ID ${id} eliminada exitosamente.`);
+        return deletedRows;
     } catch (error) {
         console.error(`[SedeService] Error en removeSede (ID: ${id}):`, error);
-        throw new Error(`Error al eliminar la sede: ${error.message}`);
+        // Capturar error de Foreign Key si intentas borrar una sede con ejemplares
+        if (error.name === 'SequelizeForeignKeyConstraintError') {
+             throw new Error(`No se puede eliminar la sede porque tiene ejemplares asociados. Mueva o elimine los ejemplares primero.`);
+        }
+        // Si es el error 404 que lanzamos antes, relanzarlo
+        if (error.status === 404) throw error;
+        // Otro error
+        throw new Error('Error interno al eliminar la sede.');
     }
 };
 
-// Exporta todas las funciones del servicio
+
 module.exports = {
     listSedes,
-    findSede,
     addSede,
+    findSede, // Usado por getSedeById
     modifySede,
     removeSede
 };
